@@ -1,6 +1,6 @@
 #!/bin/sh
 
-REPO="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+REPO="https://api.github.com/repos/itdoginfo/podkop/releases/tags/v0.2.5"
 
 IS_SHOULD_RESTART_NETWORK=
 DOWNLOAD_DIR="/tmp/podkop"
