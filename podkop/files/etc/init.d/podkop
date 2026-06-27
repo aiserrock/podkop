@@ -275,10 +275,8 @@ start_service() {
         ;;
     esac
 
-    # Set up the local list-download tunnel inbound BEFORE list_update, so the
-    # first list fetch at boot can already go through the main tunnel.
-    setup_download_proxy
-
+    # list_update sets up the download tunnel inbound itself (idempotent), so
+    # both the boot path and the cron path route fetches through the main tunnel.
     list_update
 
     if [ "$domain_list_enabled" -eq 1 ] || [ "$subnets_list_enabled" -eq 1 ]; then
@@ -424,6 +422,12 @@ remove_cron_job() {
 }
 
 list_update() {
+    # Ensure the list-download tunnel inbound is up before any fetch. This runs
+    # both at boot (start_service) and on the cron-driven `list_update` path, so
+    # daily updates also go through the main tunnel when the option is enabled
+    # (idempotent: skips if the inbound is already present).
+    setup_download_proxy
+
     # Main domains processing
     config_get_bool domain_list_enabled "main" "domain_list_enabled" "0"
     if [ "$domain_list_enabled" -eq 1 ]; then
@@ -854,6 +858,17 @@ dl_get() {
     wget -q -O "$out" "$url"
 }
 
+# Validate that a URL is reachable, via the main tunnel when enabled.
+# Returns 0 if reachable. Args: url
+dl_spider() {
+    local url="$1"
+    if dl_via_main; then
+        curl -s -m 10 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null "$url" 2>/dev/null
+    else
+        wget -q --spider "$url"
+    fi
+}
+
 lists_domains_download() {
     local URL="$1"
 
@@ -957,7 +972,7 @@ list_subnets_download() {
         ;;
     *)
         log "Custom URL for subnet"
-        if wget -q --spider "$URL"; then
+        if dl_spider "$URL"; then
             log "URL is valid"
         else
             log "URL $URL is not valid"
