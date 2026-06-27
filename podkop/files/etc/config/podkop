@@ -28,6 +28,7 @@ config main 'main'
 	#list exclude_traffic_ip ''
 	option yacd '0'
 	option socks5 '0'
+	option download_via_main '0'
 	option exclude_ntp '0'
 	option update_interval ''
 	option custom_domains_text

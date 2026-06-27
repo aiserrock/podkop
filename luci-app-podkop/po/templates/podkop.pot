@@ -10,6 +10,12 @@ msgstr ""
 msgid "Additional Settings"
 msgstr ""
 
+msgid "Download lists via main tunnel"
+msgstr ""
+
+msgid "Fetch remote domain/subnet lists through the main proxy tunnel (useful when GitHub is blocked by your ISP)"
+msgstr ""
+
 msgid "Secondary Config"
 msgstr ""
 
