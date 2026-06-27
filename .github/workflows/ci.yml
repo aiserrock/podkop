@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+      - 'feat/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck (init.d + install.sh)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck (severity=error)
+        run: |
+          shellcheck --severity=error --shell=sh \
+            podkop/files/etc/init.d/podkop \
+            install.sh
+
+  luci-js:
+    name: LuCI JS syntax check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Syntax check podkop.js
+        run: node --check luci-app-podkop/htdocs/luci-static/resources/view/podkop/podkop.js
+
+  config-validate:
+    name: Validate UCI config and jq filters
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Check init.d is valid sh
+        run: sh -n podkop/files/etc/init.d/podkop
+
+      - name: Check install.sh is valid sh
+        run: sh -n install.sh
