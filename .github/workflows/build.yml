@@ -3,42 +3,68 @@ on:
   push:
     tags:
       - v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build podkop and luci-app-podkop
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.2.1
+      - uses: actions/checkout@v5
 
-      - name: Build and push
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
         uses: docker/build-push-action@v6.9.0
         with:
           context: .
           tags: podkop:ci
+          load: true
 
       - name: Create Docker container
         run: docker create --name podkop podkop:ci
 
-      - name: Copy file from Docker container
+      - name: Copy packages from Docker container
         run: |
+          mkdir -p ./bin
           docker cp podkop:/builder/bin/packages/x86_64/utilites/. ./bin/
           docker cp podkop:/builder/bin/packages/x86_64/luci/. ./bin/
+          ls -la ./bin/
 
       - name: Filter IPK files
         run: |
-          # Извлекаем версию из тега, убирая префикс 'v'
-          VERSION=${GITHUB_REF#refs/tags/v}
+          # Версия из тега (v2.5.1 -> 2.5.1); для workflow_dispatch берём из Makefile
+          if [ -n "${GITHUB_REF##*tags/v}" ] && [ "${GITHUB_REF}" != "${GITHUB_REF##*tags/v}" ]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(sed -n 's/^PKG_VERSION:=//p' podkop/Makefile)
+          fi
+          echo "Packaging version: $VERSION"
 
           mkdir -p ./filtered-bin
-          cp ./bin/luci-i18n-podkop-ru_*.ipk "./filtered-bin/luci-i18n-podkop-ru_${VERSION}.ipk"
           cp ./bin/podkop_*.ipk ./filtered-bin/
           cp ./bin/luci-app-podkop_*.ipk ./filtered-bin/
+          # i18n package is optional; copy if present
+          if ls ./bin/luci-i18n-podkop-ru_*.ipk >/dev/null 2>&1; then
+            cp ./bin/luci-i18n-podkop-ru_*.ipk ./filtered-bin/
+          fi
+          ls -la ./filtered-bin/
 
       - name: Remove Docker container
         run: docker rm podkop
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-packages
+          path: ./filtered-bin/*.ipk
+
       - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2.0.8
         with:
           files: ./filtered-bin/*.ipk
