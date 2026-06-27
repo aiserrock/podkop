@@ -34,11 +34,14 @@ sh <(wget -O - https://raw.githubusercontent.com/aiserrock/podkop/main/install.s
 [releases этого репозитория](https://github.com/aiserrock/podkop/releases/latest),
 доставит зависимости (`dnsmasq-full`) и предложит выбрать туннель.
 
-> При выборе VLESS/Shadowsocks устанавливается **sing-box-extended** (последняя
-> версия) через установщик
-> [EikeiDev/OpenWRT-sing-box-extended](https://github.com/EikeiDev/OpenWRT-sing-box-extended),
-> а не обычный `sing-box` из opkg. Если установщик extended недоступен —
-> откат на обычный `opkg install sing-box`.
+> Язык интерфейса по умолчанию — **английский**. Русский перевод ставится
+> только если ответить `y` на отдельный вопрос (Enter / `n` = английский).
+
+> В конце установки скрипт предложит **доустановить sing-box-extended** (больше
+> протоколов/возможностей) через установщик
+> [EikeiDev/OpenWRT-sing-box-extended](https://github.com/EikeiDev/OpenWRT-sing-box-extended).
+> По умолчанию — нет (остаётся обычный `sing-box`). При согласии запускается их
+> установщик, где вы сами выбираете версию.
 
 > Для установки одной командой в репозитории `aiserrock/podkop` должен быть
 > хотя бы один релиз. Релиз собирается автоматически при пуше тега (см.

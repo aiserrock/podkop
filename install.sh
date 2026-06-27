@@ -71,16 +71,17 @@ main() {
     opkg install $DOWNLOAD_DIR/podkop*.ipk
     opkg install $DOWNLOAD_DIR/luci-app-podkop*.ipk
 
-    echo "Русский язык интерфейса ставим? y/n (Need a Russian translation?)"
+    echo "Install Russian interface translation? y/n (default: n, English) — Русский язык интерфейса?"
     while true; do
         read -r -p '' RUS
         case $RUS in
-        y)
+        y|Y)
             opkg install $DOWNLOAD_DIR/luci-i18n-podkop-ru*.ipk
             break
             ;;
 
-        n)
+        n|N|"")
+            echo "Keeping English interface."
             break
             ;;
 
@@ -92,44 +93,56 @@ main() {
 
     rm -f $DOWNLOAD_DIR/podkop*.ipk $DOWNLOAD_DIR/luci-app-podkop*.ipk $DOWNLOAD_DIR/luci-i18n-podkop-ru*.ipk
 
+    # Final optional step: offer the extended sing-box build.
+    offer_singbox_extended
+
     if [ "$IS_SHOULD_RESTART_NETWORK" ]; then
         printf "\033[32;1mRestart network\033[0m\n"
         /etc/init.d/network restart
     fi
 }
 
-# Install the latest sing-box-extended via the EikeiDev installer. That script
-# is interactive (its menu lists the 3 newest releases, "1" = latest), so we
-# feed it "1" on stdin to pick the latest non-interactively. Falls back to the
-# stock sing-box from opkg if the extended installer is unavailable or fails.
-install_singbox_extended() {
-    echo "Installing sing-box-extended (latest) from EikeiDev..."
+# Optional final step: offer to (re)install sing-box-extended from the
+# EikeiDev/OpenWRT-sing-box-extended installer. The installer is downloaded
+# locally and then run interactively, so the user picks the version themselves
+# from its menu. Declined by default; the stock sing-box stays in place.
+offer_singbox_extended() {
+    if ! command -v sing-box >/dev/null 2>&1; then
+        # sing-box wasn't installed (e.g. a VPN-only tunnel was chosen), so the
+        # extended build is not relevant here.
+        return 0
+    fi
+
+    printf "\033[32;1mInstall sing-box-extended (recommended, more protocols/features) instead of the stock sing-box? (y/n): \033[0m\n"
+    read -r INSTALL_SBX
+    if [ "$INSTALL_SBX" != "y" ] && [ "$INSTALL_SBX" != "Y" ]; then
+        echo "Keeping the stock sing-box."
+        return 0
+    fi
 
     installer="/tmp/singbox-extended-install.sh"
     rm -f "$installer"
 
     if wget -q -O "$installer" "$SINGBOX_EXTENDED_INSTALLER" 2>/dev/null && [ -s "$installer" ]; then
-        # "1" selects the latest release in the installer's menu.
-        if echo "1" | sh "$installer"; then
-            rm -f "$installer"
-            if command -v sing-box >/dev/null 2>&1; then
-                echo "sing-box-extended installed: $(sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
-                return 0
-            fi
-        fi
+        echo "Launching the sing-box-extended installer (choose a version from its menu)..."
+        sh "$installer"
         rm -f "$installer"
-        echo "sing-box-extended install did not complete; falling back to stock sing-box."
+        if command -v sing-box >/dev/null 2>&1; then
+            echo "sing-box now: $(sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
+            echo "Restarting podkop to use the new sing-box..."
+            /etc/init.d/podkop restart >/dev/null 2>&1
+        fi
     else
         rm -f "$installer"
-        echo "Could not download the sing-box-extended installer; falling back to stock sing-box."
+        echo "Could not download the sing-box-extended installer. Stock sing-box kept."
+        echo "You can install it later:"
+        echo "  wget -O /tmp/sbx.sh $SINGBOX_EXTENDED_INSTALLER && sh /tmp/sbx.sh"
     fi
-
-    opkg install sing-box
 }
 
 add_tunnel() {
     echo "What type of VPN or proxy will be used? We also can automatically configure Wireguard and Amnezia WireGuard."
-    echo "1) VLESS, Shadowsocks (sing-box-extended will be installed)"
+    echo "1) VLESS, Shadowsocks (A sing-box will be installed)"
     echo "2) Wireguard"
     echo "3) AmneziaWG"
     echo "4) OpenVPN"
@@ -141,7 +154,7 @@ add_tunnel() {
         case $TUNNEL in
 
         1)
-            install_singbox_extended
+            opkg install sing-box
             break
             ;;
 
