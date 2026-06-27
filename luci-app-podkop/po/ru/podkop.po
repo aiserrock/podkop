@@ -10,6 +10,27 @@ msgstr "Основные настройки"
 msgid "Additional Settings"
 msgstr "Дополнительные настройки"
 
+msgid "Podkop"
+msgstr "Podkop"
+
+msgid "Sing-box"
+msgstr "Sing-box"
+
+msgid "LuCI app"
+msgstr "LuCI-приложение"
+
+msgid "OpenWrt"
+msgstr "OpenWrt"
+
+msgid "Device"
+msgstr "Устройство"
+
+msgid "unknown"
+msgstr "неизвестно"
+
+msgid "Version info unavailable"
+msgstr "Информация о версиях недоступна"
+
 msgid "Download lists via main tunnel"
 msgstr "Качать списки через основной туннель"
 
