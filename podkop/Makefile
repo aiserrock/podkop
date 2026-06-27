@@ -45,7 +45,7 @@ endef
 define Package/podkop/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/podkop $(1)/etc/init.d/podkop
-	sed -i "s/VERSION_FROM_MAKEFILE/$(PKG_VERSION)/g" $(1)/etc/init.d/podkop
+	sed -i 's/^PODKOP_VERSION="VERSION_FROM_MAKEFILE"/PODKOP_VERSION="$(PKG_VERSION)"/' $(1)/etc/init.d/podkop
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/etc/config/podkop $(1)/etc/config/podkop

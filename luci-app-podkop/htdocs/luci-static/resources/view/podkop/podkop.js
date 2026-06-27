@@ -9,6 +9,17 @@ return view.extend({
     async render() {
         var m, s, o;
 
+        // Fetch installed component versions for the Diagnostics header.
+        var versionInfo = null;
+        try {
+            const vres = await fs.exec('/etc/init.d/podkop', ['get_system_info']);
+            if (vres && vres.code === 0 && vres.stdout) {
+                versionInfo = JSON.parse(vres.stdout);
+            }
+        } catch (e) {
+            versionInfo = null;
+        }
+
         m = new form.Map('podkop', _('Podkop configuration'), null, ['main', 'second', 'third']);
 
         s = m.section(form.TypedSection, 'main');
@@ -888,6 +899,45 @@ return view.extend({
         };
 
         o = s.tab('diagnostics', _('Diagnostics'));
+
+        // Installed versions block at the top of Diagnostics.
+        o = s.taboption('diagnostics', form.DummyValue, '_version_info');
+        o.rawhtml = true;
+        o.cfgvalue = function () {
+            const rows = [];
+            // Escape values before inserting into rawhtml (defense in depth:
+            // values come from root-local router data, but never inject raw).
+            const esc = function (s) {
+                return String(s == null ? '' : s)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+            };
+            const addRow = function (label, value) {
+                rows.push(
+                    '<tr>' +
+                    '<td style="padding:2px 12px 2px 0;color:#666;white-space:nowrap;">' + esc(label) + '</td>' +
+                    '<td style="padding:2px 0;font-family:monospace;font-weight:600;">' +
+                    esc(value || _('unknown')) + '</td>' +
+                    '</tr>'
+                );
+            };
+
+            if (versionInfo) {
+                addRow(_('Podkop'), versionInfo.podkop_version);
+                addRow(_('Sing-box'), versionInfo.sing_box_version);
+                addRow(_('LuCI app'), versionInfo.luci_app_version);
+                addRow(_('OpenWrt'), versionInfo.openwrt_version);
+                if (versionInfo.device_model && versionInfo.device_model !== 'unknown') {
+                    addRow(_('Device'), versionInfo.device_model);
+                }
+            } else {
+                rows.push('<tr><td style="color:#999;">' + _('Version info unavailable') + '</td></tr>');
+            }
+
+            return '<table style="border-collapse:collapse;margin:0.5em 0;">' + rows.join('') + '</table>';
+        };
 
         function formatDiagnosticOutput(output) {
             if (!output) return '';

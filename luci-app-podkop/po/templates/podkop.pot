@@ -10,6 +10,27 @@ msgstr ""
 msgid "Additional Settings"
 msgstr ""
 
+msgid "Podkop"
+msgstr ""
+
+msgid "Sing-box"
+msgstr ""
+
+msgid "LuCI app"
+msgstr ""
+
+msgid "OpenWrt"
+msgstr ""
+
+msgid "Device"
+msgstr ""
+
+msgid "unknown"
+msgstr ""
+
+msgid "Version info unavailable"
+msgstr ""
+
 msgid "Download lists via main tunnel"
 msgstr ""
 

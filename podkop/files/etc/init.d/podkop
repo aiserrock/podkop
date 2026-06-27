@@ -7,7 +7,7 @@ script=$(readlink "$initscript")
 NAME="$(basename ${script:-$initscript})"
 config_load "$NAME"
 
-EXTRA_COMMANDS="list_update add_route_interface check_proxy check_nft check_github check_logs check_all check_three backup restore show_debug_log"
+EXTRA_COMMANDS="list_update add_route_interface check_proxy check_nft check_github check_logs check_all check_three backup restore show_debug_log show_version get_system_info"
 EXTRA_HELP="        list_update     Updating domain and subnet lists
         add_route_interface  Adding route for interface
         sing_box_config_vless For test vless string
@@ -19,7 +19,9 @@ EXTRA_HELP="        list_update     Updating domain and subnet lists
         check_three         Run check_proxy, check_nft and check_github
         backup              Print current podkop config to stdout
         restore <file>      Restore podkop config from a file
-        show_debug_log      Show the full debug log (/tmp/podkop.log)"
+        show_debug_log      Show the full debug log (/tmp/podkop.log)
+        show_version        Show installed podkop version
+        get_system_info     Show installed versions (podkop, sing-box, LuCI, OpenWrt) as JSON"
 
 [ ! -L /usr/sbin/podkop ] && ln -s /etc/init.d/podkop /usr/sbin/podkop
 
@@ -33,6 +35,8 @@ SUBNETS_META="${GITHUB_RAW_URL}/Subnets/IPv4/Meta.lst"
 SUBNETS_DISCORD="${GITHUB_RAW_URL}/Subnets/IPv4/Discord.lst"
 SING_BOX_CONFIG="/etc/sing-box/config.json"
 DOWNLOAD_PROXY_PORT="2081"
+# Replaced at build time by the Makefile (sed VERSION_FROM_MAKEFILE -> PKG_VERSION).
+PODKOP_VERSION="VERSION_FROM_MAKEFILE"
 
 config_get update_interval "main" "update_interval" "0 4 * * *"
 cron_job="${update_interval} /etc/init.d/podkop list_update"
@@ -1524,6 +1528,58 @@ show_debug_log() {
     else
         nolog "Debug log $DEBUG_LOG not found. Enable Log level = debug in settings and restart podkop."
     fi
+}
+
+# Print the installed podkop version.
+show_version() {
+    echo "$PODKOP_VERSION"
+}
+
+# Emit installed component versions as JSON for the LuCI Diagnostics header.
+# Only installed versions are reported (no network/latest lookup).
+get_system_info() {
+    local podkop_version sing_box_version luci_app_version openwrt_version device_model
+
+    podkop_version="$PODKOP_VERSION"
+    # If the build-time placeholder was never substituted, report it honestly.
+    [ "$podkop_version" = "VERSION_FROM_MAKEFILE" ] && podkop_version="unknown"
+
+    if command -v sing-box >/dev/null 2>&1; then
+        sing_box_version=$(sing-box version 2>/dev/null | head -n 1 | awk '{print $3}')
+        [ -z "$sing_box_version" ] && sing_box_version="unknown"
+    else
+        sing_box_version="not installed"
+    fi
+
+    if command -v opkg >/dev/null 2>&1; then
+        luci_app_version=$(opkg list-installed 2>/dev/null | awk '/^luci-app-podkop /{print $3; exit}')
+        [ -z "$luci_app_version" ] && luci_app_version="not installed"
+    else
+        luci_app_version="unknown"
+    fi
+
+    if [ -f /etc/os-release ]; then
+        openwrt_version=$(grep '^OPENWRT_RELEASE=' /etc/os-release | cut -d'"' -f2)
+        [ -z "$openwrt_version" ] && openwrt_version=$(grep '^VERSION=' /etc/os-release | cut -d'"' -f2)
+        [ -z "$openwrt_version" ] && openwrt_version="unknown"
+    else
+        openwrt_version="unknown"
+    fi
+
+    if [ -f /tmp/sysinfo/model ]; then
+        device_model=$(cat /tmp/sysinfo/model)
+        [ -z "$device_model" ] && device_model="unknown"
+    else
+        device_model="unknown"
+    fi
+
+    jq -n \
+        --arg podkop "$podkop_version" \
+        --arg singbox "$sing_box_version" \
+        --arg luci "$luci_app_version" \
+        --arg openwrt "$openwrt_version" \
+        --arg model "$device_model" \
+        '{podkop_version: $podkop, sing_box_version: $singbox, luci_app_version: $luci, openwrt_version: $openwrt, device_model: $model}'
 }
 
 # Print the current podkop UCI config to stdout (consumed by the LuCI Backup
