@@ -52,32 +52,65 @@ start_service() {
             log "Interface undefined"
         fi
 
+        # main=vpn: second/third may run as proxy sub-chains. Build them into
+        # ONE sing-box config (N tproxy inbounds + N tagged outbounds + N route
+        # rules) so multiple proxy sub-chains don't overwrite each other.
         config_get_bool second_enable "second" "second_enable" "0"
         config_get second_mode "second" "second_mode" "0"
-        if [ "$second_enable" -eq "1" ] && [ "$second_mode" = "proxy" ]; then
-            config_get proxy_config_type "second" "second_proxy_config_type"
-            
-            if [ "$proxy_config_type" = "outbound" ]; then
-                config_get outbound_json "second" "second_outbound_json"
-                if [ -n "$outbound_json" ]; then
-                    log "Using JSON outbound configuration for second proxy"
-                    sing_box_config_outbound_json "$outbound_json" "1603"
-                else
-                    log "Missing outbound JSON configuration"
+        config_get_bool third_enable "third" "third_enable" "0"
+        config_get third_mode "third" "third_mode" "0"
+
+        second_proxy=0
+        [ "$second_enable" -eq "1" ] && [ "$second_mode" = "proxy" ] && second_proxy=1
+        third_proxy=0
+        [ "$third_enable" -eq "1" ] && [ "$third_mode" = "proxy" ] && third_proxy=1
+
+        if [ "$second_proxy" -eq 1 ] || [ "$third_proxy" -eq 1 ]; then
+            log "Proxy sub-chain(s) under VPN main"
+
+            inbounds_json='[]'
+            rules_json='[]'
+            merge_files=""
+
+            if [ "$second_proxy" -eq 1 ]; then
+                outbound_second=$(mktemp)
+                if ! sing_box_build_proxy_outbound "second" "second" "1603" "$outbound_second"; then
+                    rm -f "$outbound_second"
                     return
                 fi
-            else
-                config_get proxy_string "second" "second_proxy_string"
-                if [[ "$proxy_string" =~ ^ss:// ]]; then
-                    sing_box_config_shadowsocks "$proxy_string" "1603"
-                elif [[ "$proxy_string" =~ ^vless:// ]]; then
-                    sing_box_config_vless "$proxy_string" "1603"
-                else
-                    log "Unsupported proxy type or missing configuration"
-                    return
-                fi
+                inbounds_json=$(echo "$inbounds_json" | jq -c '. + [{"type":"tproxy","listen":"::","listen_port":1603,"sniff":false,"tag":"second"}]')
+                rules_json=$(echo "$rules_json" | jq -c '. + [{"inbound":"second","outbound":"second"}]')
+                merge_files="$merge_files $outbound_second"
             fi
-            add_route_tproxy podkop2
+
+            if [ "$third_proxy" -eq 1 ]; then
+                outbound_third=$(mktemp)
+                if ! sing_box_build_proxy_outbound "third" "third" "1604" "$outbound_third"; then
+                    rm -f "$outbound_second" "$outbound_third"
+                    return
+                fi
+                inbounds_json=$(echo "$inbounds_json" | jq -c '. + [{"type":"tproxy","listen":"::","listen_port":1604,"sniff":false,"tag":"third"}]')
+                rules_json=$(echo "$rules_json" | jq -c '. + [{"inbound":"third","outbound":"third"}]')
+                merge_files="$merge_files $outbound_third"
+            fi
+
+            jq -s \
+                --argjson inbounds "$inbounds_json" \
+                --argjson rules "$rules_json" \
+                '{
+                    "log": {"level": "warn"},
+                    "inbounds": $inbounds,
+                    "outbounds": (reduce .[] as $f ([]; . + $f.outbounds)),
+                    "route": {
+                        "rules": $rules,
+                        "auto_detect_interface": true
+                    }
+                }' $merge_files > $SING_BOX_CONFIG
+
+            rm -f "$outbound_second" "$outbound_third"
+
+            [ "$second_proxy" -eq 1 ] && add_route_tproxy podkop2
+            [ "$third_proxy" -eq 1 ] && add_route_tproxy podkop3
             sing_box_config_check
             sing_box_uci
             /etc/init.d/sing-box restart
@@ -93,6 +126,16 @@ start_service() {
                 log "Interface undefined"
             fi
         fi
+
+        if [ "$third_enable" -eq "1" ] && [ "$third_mode" = "vpn" ]; then
+            log "VPN mode for third"
+            config_get interface "third" "third_interface" "0"
+            if [ -n "$interface" ]; then
+                add_route_interface "$interface" "podkop3"
+            else
+                log "Interface undefined"
+            fi
+        fi
         ;;
     "proxy")
         log "Proxy mode"
@@ -101,116 +144,74 @@ start_service() {
             return
         fi
 
-        # Main - proxy, Second - proxy
+        # Determine which chains run in proxy mode (main is always proxy here).
+        # second/third count only when enabled AND their mode is proxy.
         config_get_bool second_enable "second" "second_enable" "0"
         config_get second_mode "second" "second_mode" "0"
-        if [ "$second_enable" -eq "1" ] && [ "$second_mode" = "proxy" ]; then
-            log "Two proxy enable"
+        config_get_bool third_enable "third" "third_enable" "0"
+        config_get third_mode "third" "third_mode" "0"
+
+        second_proxy=0
+        [ "$second_enable" -eq "1" ] && [ "$second_mode" = "proxy" ] && second_proxy=1
+        third_proxy=0
+        [ "$third_enable" -eq "1" ] && [ "$third_mode" = "proxy" ] && third_proxy=1
+
+        if [ "$second_proxy" -eq 1 ] || [ "$third_proxy" -eq 1 ]; then
+            # Multi-chain proxy: build one sing-box config with N tproxy
+            # inbounds + N tagged outbounds + N inbound->outbound route rules.
+            log "Multi proxy enable"
+
             outbound_main=$(mktemp)
-            outbound_second=$(mktemp)
+            sing_box_build_proxy_outbound "main" "main" "1602" "$outbound_main" || return
 
-            # Main proxy config
-            config_get proxy_config_type main "proxy_config_type"
-            if [ "$proxy_config_type" = "outbound" ]; then
-                config_get outbound_json main "outbound_json"
-                if [ -n "$outbound_json" ]; then
-                    echo '{"outbounds":[' > "$outbound_main"
-                    echo "$outbound_json" | jq '. + {tag: "main"}' >> "$outbound_main"
-                    echo ']}' >> "$outbound_main"
-                else
-                    log "Missing main outbound JSON configuration"
+            inbounds_json='[{"type":"tproxy","listen":"::","listen_port":1602,"sniff":false,"tag":"main"}]'
+            rules_json='[{"inbound":"main","outbound":"main"}]'
+            merge_files="$outbound_main"
+
+            if [ "$second_proxy" -eq 1 ]; then
+                outbound_second=$(mktemp)
+                if ! sing_box_build_proxy_outbound "second" "second" "1603" "$outbound_second"; then
                     rm -f "$outbound_main" "$outbound_second"
                     return
                 fi
-            else
-                config_get proxy_string main "proxy_string"
-                if [[ "$proxy_string" =~ ^ss:// ]]; then
-                    sing_box_config_shadowsocks "$proxy_string" "1602"
-                    jq '.outbounds[0] + {tag: "main"} | {outbounds: [.]}' $SING_BOX_CONFIG > "$outbound_main"
-                elif [[ "$proxy_string" =~ ^vless:// ]]; then
-                    sing_box_config_vless "$proxy_string" "1602"
-                    jq '.outbounds[0] + {tag: "main"} | {outbounds: [.]}' $SING_BOX_CONFIG > "$outbound_main"
-                else
-                    log "Unsupported proxy type or missing configuration for main"
-                    rm -f "$outbound_main" "$outbound_second"
-                    return
-                fi
+                inbounds_json=$(echo "$inbounds_json" | jq -c '. + [{"type":"tproxy","listen":"::","listen_port":1603,"sniff":false,"tag":"second"}]')
+                rules_json=$(echo "$rules_json" | jq -c '. + [{"inbound":"second","outbound":"second"}]')
+                merge_files="$merge_files $outbound_second"
             fi
 
-            # Second proxy config
-            config_get proxy_config_type second "second_proxy_config_type"
-            if [ "$proxy_config_type" = "outbound" ]; then
-                config_get outbound_json second "second_outbound_json"
-                if [ -n "$outbound_json" ]; then
-                    echo '{"outbounds":[' > "$outbound_second"
-                    echo "$outbound_json" | jq '. + {tag: "second"}' >> "$outbound_second"
-                    echo ']}' >> "$outbound_second"
-                else
-                    log "Missing second outbound JSON configuration"
-                    rm -f "$outbound_main" "$outbound_second"
+            if [ "$third_proxy" -eq 1 ]; then
+                outbound_third=$(mktemp)
+                if ! sing_box_build_proxy_outbound "third" "third" "1604" "$outbound_third"; then
+                    rm -f "$outbound_main" "$outbound_second" "$outbound_third"
                     return
                 fi
-            else
-                config_get proxy_string "second" "second_proxy_string"
-                if [[ "$proxy_string" =~ ^ss:// ]]; then
-                    sing_box_config_shadowsocks "$proxy_string" "1603"
-                    jq '.outbounds[0] + {tag: "second"} | {outbounds: [.]}' $SING_BOX_CONFIG > "$outbound_second"
-                elif [[ "$proxy_string" =~ ^vless:// ]]; then
-                    sing_box_config_vless "$proxy_string" "1603"
-                    jq '.outbounds[0] + {tag: "second"} | {outbounds: [.]}' $SING_BOX_CONFIG > "$outbound_second"
-                else
-                    log "Unsupported proxy type or missing configuration for second"
-                    rm -f "$outbound_main" "$outbound_second"
-                    return
-                fi
+                inbounds_json=$(echo "$inbounds_json" | jq -c '. + [{"type":"tproxy","listen":"::","listen_port":1604,"sniff":false,"tag":"third"}]')
+                rules_json=$(echo "$rules_json" | jq -c '. + [{"inbound":"third","outbound":"third"}]')
+                merge_files="$merge_files $outbound_third"
             fi
 
-            jq -s '{
-                "log": {"level": "warn"},
-                "inbounds": [
-                    {
-                        "type": "tproxy",
-                        "listen": "::",
-                        "listen_port": 1602,
-                        "sniff": false,
-                        "tag": "main"
-                    },
-                    {
-                        "type": "tproxy",
-                        "listen": "::",
-                        "listen_port": 1603,
-                        "sniff": false,
-                        "tag": "second"
+            jq -s \
+                --argjson inbounds "$inbounds_json" \
+                --argjson rules "$rules_json" \
+                '{
+                    "log": {"level": "warn"},
+                    "inbounds": $inbounds,
+                    "outbounds": (reduce .[] as $f ([]; . + $f.outbounds)),
+                    "route": {
+                        "rules": $rules,
+                        "auto_detect_interface": true
                     }
-                ],
-                "outbounds": (.[0].outbounds + .[1].outbounds),
-                "route": {
-                    "rules": [
-                        {
-                            "inbound": "main",
-                            "outbound": "main"
-                        },
-                        {
-                            "inbound": "second",
-                            "outbound": "second"
-                        }
-                    ],
-                    "auto_detect_interface": true
-                }
-            }' "$outbound_main" "$outbound_second" > $SING_BOX_CONFIG
+                }' $merge_files > $SING_BOX_CONFIG
 
-            rm -f "$outbound_main" "$outbound_second"
+            rm -f "$outbound_main" "$outbound_second" "$outbound_third"
 
             add_route_tproxy podkop
-            add_route_tproxy podkop2
-        fi
-
-        # Main proxy, second disable/vpn
-        config_get_bool second_enable "second" "second_enable" "0"
-        config_get second_mode "second" "second_mode" "0"
-        if [ "$second_enable" -eq "0" ] || [ "$second_mode" = "vpn" ]; then
+            [ "$second_proxy" -eq 1 ] && add_route_tproxy podkop2
+            [ "$third_proxy" -eq 1 ] && add_route_tproxy podkop3
+        else
+            # Main proxy only, second/third disabled or in vpn mode
             config_get proxy_config_type main "proxy_config_type"
-            
+
             if [ "$proxy_config_type" = "outbound" ]; then
                 config_get outbound_json main "outbound_json"
                 if [ -n "$outbound_json" ]; then
@@ -248,6 +249,20 @@ start_service() {
             config_get interface "second" "second_interface" "0"
             if [ -n "$interface" ]; then
                 add_route_interface "$interface" "podkop2"
+            else
+                log "Interface undefined"
+            fi
+        fi
+
+        # Main proxy, Third VPN
+        config_get_bool third_enable "third" "third_enable" "0"
+        config_get third_mode "third" "third_mode" "0"
+        if [ "$third_enable" -eq "1" ] && [ "$third_mode" = "vpn" ]; then
+            log "VPN mode for third"
+            log "You are using VPN mode, make sure you have installed all the necessary packages, configured, created the zone and forwarding."
+            config_get interface "third" "third_interface" "0"
+            if [ -n "$interface" ]; then
+                add_route_interface "$interface" "podkop3"
             else
                 log "Interface undefined"
             fi
@@ -325,6 +340,10 @@ stop_service() {
         ip rule del fwmark 0x106 table podkop2 priority 106
     fi
 
+    if ip rule list | grep -q "podkop3"; then
+        ip rule del fwmark 0x107 table podkop3 priority 107
+    fi
+
     log "Flush ip route"
     if ip route list table podkop; then
         ip route flush table podkop
@@ -334,11 +353,16 @@ stop_service() {
         ip route flush table podkop2
     fi
 
+    if ip route list table podkop3; then
+        ip route flush table podkop3
+    fi
+
     log "Stop sing-box"
     config_get mode_main "main" "mode" "0"
     config_get mode_second "second" "second_mode" "0"
+    config_get mode_third "third" "third_mode" "0"
 
-    if [ "$mode_main" = "proxy" ] || [ "$mode_second" = "proxy" ]; then
+    if [ "$mode_main" = "proxy" ] || [ "$mode_second" = "proxy" ] || [ "$mode_third" = "proxy" ]; then
         /etc/init.d/sing-box stop
         /etc/init.d/sing-box disable
     fi
@@ -510,7 +534,7 @@ list_update() {
     if [ "$second_custom_subnets_list_type" != "disabled" ]; then
         log "Adding a custom subnets list. Second"
         add_set "podkop2_subnets" "second"
-        
+
         if [ "$second_custom_subnets_list_type" = "dynamic" ]; then
             config_list_foreach second second_custom_subnets list_custom_subnets_preprocess "podkop2"
         elif [ "$second_custom_subnets_list_type" = "text" ]; then
@@ -519,11 +543,55 @@ list_update() {
         fi
     fi
 
+    # Third custom domains processing
+    config_get third_custom_domains_list_type "third" "third_custom_domains_list_enabled" "disabled"
+    if [ "$third_custom_domains_list_type" != "disabled" ]; then
+        log "Adding a custom domains list. Third podkop"
+        add_set "podkop3_domains" "third"
+        rm -f /tmp/dnsmasq.d/podkop3-custom-domains.lst
+
+        if [ "$third_custom_domains_list_type" = "dynamic" ]; then
+            config_list_foreach third third_custom_domains "list_custom_domains_create" "podkop3"
+        elif [ "$third_custom_domains_list_type" = "text" ]; then
+            config_get third_custom_domains_text third "third_custom_domains_text"
+            process_domains_text "$third_custom_domains_text" "podkop3"
+        fi
+
+        dnsmasq_config_check podkop3-custom-domains.lst
+    fi
+
+    # Third service domains
+    config_get_bool third_domain_service_enabled "third" "third_domain_service_enabled" "0"
+    if [ "$third_domain_service_enabled" -eq 1 ]; then
+        log "Adding a service for podkop3"
+        add_set "podkop3_domains" "third"
+        config_get third_service_list third "third_service_list"
+        lists_services_download "$third_service_list" "podkop3"
+        config_list_foreach third third_custom_domains "list_delist_domains"
+        dnsmasq_config_check podkop3-domains.lst
+    fi
+
+    # Third custom subnets
+    config_get third_custom_subnets_list_type "third" "third_custom_subnets_list_enabled" "disabled"
+    if [ "$third_custom_subnets_list_type" != "disabled" ]; then
+        log "Adding a custom subnets list. Third"
+        add_set "podkop3_subnets" "third"
+
+        if [ "$third_custom_subnets_list_type" = "dynamic" ]; then
+            config_list_foreach third third_custom_subnets list_custom_subnets_preprocess "podkop3"
+        elif [ "$third_custom_subnets_list_type" = "text" ]; then
+            config_get third_custom_subnets_text third "third_custom_subnets_text"
+            process_subnets_text "$third_custom_subnets_text" "podkop3"
+        fi
+    fi
+
     # Restart dnsmasq if needed
     if [ "$domain_list_enabled" -eq 1 ] || [ "$custom_domains_list_type" != "disabled" ] || \
        [ "$custom_download_domains_list_enabled" -eq 1 ] || \
        [ "$second_custom_domains_list_type" != "disabled" ] || \
-       [ "$second_domain_service_enabled" -eq 1 ]; then
+       [ "$second_domain_service_enabled" -eq 1 ] || \
+       [ "$third_custom_domains_list_type" != "disabled" ] || \
+       [ "$third_domain_service_enabled" -eq 1 ]; then
         /etc/init.d/dnsmasq restart
     fi
 }
@@ -543,6 +611,10 @@ routing_table_create() {
     if [ "$second_enable" -eq 1 ]; then
         grep -q "106 podkop2" /etc/iproute2/rt_tables || echo '106 podkop2' >>/etc/iproute2/rt_tables
     fi
+    config_get_bool third_enable "third" "third_enable" "0"
+    if [ "$third_enable" -eq 1 ]; then
+        grep -q "107 podkop3" /etc/iproute2/rt_tables || echo '107 podkop3' >>/etc/iproute2/rt_tables
+    fi
 }
 
 add_set() {
@@ -555,6 +627,8 @@ add_set() {
     nft add set inet PodkopTable "$set_name" { type ipv4_addr\; flags interval\; auto-merge\; }
     if [ "$connect" = "main" ]; then
         config_get mode "$connect" "mode"
+    elif [ "$connect" = "third" ]; then
+        config_get mode "$connect" "third_mode"
     else
         config_get mode "$connect" "second_mode"
     fi
@@ -565,6 +639,8 @@ add_set() {
                 nft add rule inet PodkopTable mangle iifname "br-lan" ip daddr @"$set_name" meta mark set 0x105 counter
             elif [ "$connect" = "second" ]; then
                 nft add rule inet PodkopTable mangle iifname "br-lan" ip daddr @"$set_name" meta mark set 0x106 counter
+            elif [ "$connect" = "third" ]; then
+                nft add rule inet PodkopTable mangle iifname "br-lan" ip daddr @"$set_name" meta mark set 0x107 counter
             fi
         fi
         ;;
@@ -588,6 +664,13 @@ add_set() {
                 if ! ( nft list table inet PodkopTable | grep -q "meta mark 0x00000106 meta l4proto tcp tproxy" ); then
                     nft add rule inet PodkopTable proxy meta mark 0x106 meta l4proto tcp tproxy ip to :1603 counter
                     nft add rule inet PodkopTable proxy meta mark 0x106 meta l4proto udp tproxy ip to :1603 counter
+                fi
+            elif [ "$connect" = "third" ]; then
+                nft add rule inet PodkopTable mangle iifname "br-lan" ip daddr @"$set_name" meta l4proto tcp meta mark set 0x107 counter
+                nft add rule inet PodkopTable mangle iifname "br-lan" ip daddr @"$set_name" meta l4proto udp meta mark set 0x107 counter
+                if ! ( nft list table inet PodkopTable | grep -q "meta mark 0x00000107 meta l4proto tcp tproxy" ); then
+                    nft add rule inet PodkopTable proxy meta mark 0x107 meta l4proto tcp tproxy ip to :1604 counter
+                    nft add rule inet PodkopTable proxy meta mark 0x107 meta l4proto udp tproxy ip to :1604 counter
                 fi
             fi
         fi
@@ -669,6 +752,16 @@ add_mark() {
             log "Podkop second marking rule exist"
         fi
     fi
+
+    config_get_bool third_enable "third" "third_enable" "0"
+    if [ "$third_enable" -eq 1 ]; then
+        if ! ip rule list | grep -q "from all fwmark 0x107 lookup podkop3"; then
+            log "Create marking rule for podkop third"
+            ip -4 rule add fwmark 0x107 table podkop3 priority 107
+        else
+            log "Podkop third marking rule exist"
+        fi
+    fi
 }
 
 lists_domains_download() {
@@ -719,6 +812,7 @@ lists_domains_download() {
 
 lists_services_download() {
     local URL="$1"
+    local name="${2:-podkop2}"
 
     case "$URL" in
     "youtube")
@@ -733,10 +827,10 @@ lists_services_download() {
     count=0
     while true; do
         if ping -c 1 -W 3 github.com >/dev/null 2>&1; then
-            wget -q -O /tmp/dnsmasq.d/podkop2-domains.lst $URL
+            wget -q -O /tmp/dnsmasq.d/${name}-domains.lst $URL
             if [ $? -eq 0 ]; then
-                delist_downloaded_domains
-                sed -i 's/.*/nftset=\/&\/4#inet#PodkopTable#podkop2_domains/g' /tmp/dnsmasq.d/podkop2-domains.lst
+                delist_downloaded_domains "$name"
+                sed -i "s/.*/nftset=\/&\/4#inet#PodkopTable#${name}_domains/g" /tmp/dnsmasq.d/${name}-domains.lst
                 return 0
             fi
         else
@@ -880,7 +974,8 @@ list_delist_domains() {
 }
 
 delist_downloaded_domains() {
-    local domains="/tmp/dnsmasq.d/podkop2-domains.lst"
+    local name="${1:-podkop2}"
+    local domains="/tmp/dnsmasq.d/${name}-domains.lst"
 
     if [ -f "$domains" ]; then
         while IFS= read -r line; do
@@ -938,6 +1033,52 @@ sing_box_uci() {
     else
         log "Sing-box UCI config OK"
     fi
+}
+
+# Build a single tagged outbound for one proxy chain into $out_file as
+# {"outbounds":[{... ,"tag":"<tag>"}]}. Mirrors the per-chain logic of the
+# original main/second proxy blocks so multi-chain assembly stays consistent.
+# Args: section uci_prefix listen_port out_file
+sing_box_build_proxy_outbound() {
+    local section="$1"
+    local tag="$2"
+    local listen_port="$3"
+    local out_file="$4"
+
+    local cfg_type_opt proxy_string_opt outbound_json_opt
+    if [ "$section" = "main" ]; then
+        cfg_type_opt="proxy_config_type"
+        proxy_string_opt="proxy_string"
+        outbound_json_opt="outbound_json"
+    else
+        cfg_type_opt="${section}_proxy_config_type"
+        proxy_string_opt="${section}_proxy_string"
+        outbound_json_opt="${section}_outbound_json"
+    fi
+
+    config_get proxy_config_type "$section" "$cfg_type_opt"
+    if [ "$proxy_config_type" = "outbound" ]; then
+        config_get outbound_json "$section" "$outbound_json_opt"
+        if [ -n "$outbound_json" ]; then
+            echo "$outbound_json" | jq --arg tag "$tag" '{outbounds: [. + {tag: $tag}]}' > "$out_file"
+        else
+            log "Missing $section outbound JSON configuration"
+            return 1
+        fi
+    else
+        config_get proxy_string "$section" "$proxy_string_opt"
+        if [[ "$proxy_string" =~ ^ss:// ]]; then
+            sing_box_config_shadowsocks "$proxy_string" "$listen_port"
+            jq --arg tag "$tag" '.outbounds[0] + {tag: $tag} | {outbounds: [.]}' $SING_BOX_CONFIG > "$out_file"
+        elif [[ "$proxy_string" =~ ^vless:// ]]; then
+            sing_box_config_vless "$proxy_string" "$listen_port"
+            jq --arg tag "$tag" '.outbounds[0] + {tag: $tag} | {outbounds: [.]}' $SING_BOX_CONFIG > "$out_file"
+        else
+            log "Unsupported proxy type or missing configuration for $section"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 sing_box_config_shadowsocks() {
@@ -1169,7 +1310,7 @@ check_nft() {
     nolog "Checking PodkopTable rules..."
     
     # Список всех возможных сетов
-    local sets="podkop_domains podkop_subnets podkop2_domains podkop2_subnets localv4"
+    local sets="podkop_domains podkop_subnets podkop2_domains podkop2_subnets podkop3_domains podkop3_subnets localv4"
     
     nolog "Sets statistics:"
     for set_name in $sets; do

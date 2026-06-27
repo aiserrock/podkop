@@ -19,6 +19,15 @@ msgstr ""
 msgid "Enable secondary VPN/Proxy configuration"
 msgstr ""
 
+msgid "Third Config"
+msgstr ""
+
+msgid "Third VPN/Proxy Enable"
+msgstr ""
+
+msgid "Enable third VPN/Proxy configuration"
+msgstr ""
+
 msgid "Connection Type"
 msgstr ""
 

@@ -19,6 +19,15 @@ msgstr "Включить второй VPN/Proxy"
 msgid "Enable secondary VPN/Proxy configuration"
 msgstr "Включить конфигурацию второго VPN/Proxy"
 
+msgid "Third Config"
+msgstr "Третий маршрут"
+
+msgid "Third VPN/Proxy Enable"
+msgstr "Включить третий VPN/Proxy"
+
+msgid "Enable third VPN/Proxy configuration"
+msgstr "Включить конфигурацию третьего VPN/Proxy"
+
 msgid "Connection Type"
 msgstr "Тип подключения"
 
