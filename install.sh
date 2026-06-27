@@ -1,6 +1,7 @@
 #!/bin/sh
 
 REPO="https://api.github.com/repos/aiserrock/podkop/releases/latest"
+SINGBOX_EXTENDED_INSTALLER="https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh"
 
 IS_SHOULD_RESTART_NETWORK=
 DOWNLOAD_DIR="/tmp/podkop"
@@ -97,9 +98,38 @@ main() {
     fi
 }
 
+# Install the latest sing-box-extended via the EikeiDev installer. That script
+# is interactive (its menu lists the 3 newest releases, "1" = latest), so we
+# feed it "1" on stdin to pick the latest non-interactively. Falls back to the
+# stock sing-box from opkg if the extended installer is unavailable or fails.
+install_singbox_extended() {
+    echo "Installing sing-box-extended (latest) from EikeiDev..."
+
+    installer="/tmp/singbox-extended-install.sh"
+    rm -f "$installer"
+
+    if wget -q -O "$installer" "$SINGBOX_EXTENDED_INSTALLER" 2>/dev/null && [ -s "$installer" ]; then
+        # "1" selects the latest release in the installer's menu.
+        if echo "1" | sh "$installer"; then
+            rm -f "$installer"
+            if command -v sing-box >/dev/null 2>&1; then
+                echo "sing-box-extended installed: $(sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
+                return 0
+            fi
+        fi
+        rm -f "$installer"
+        echo "sing-box-extended install did not complete; falling back to stock sing-box."
+    else
+        rm -f "$installer"
+        echo "Could not download the sing-box-extended installer; falling back to stock sing-box."
+    fi
+
+    opkg install sing-box
+}
+
 add_tunnel() {
     echo "What type of VPN or proxy will be used? We also can automatically configure Wireguard and Amnezia WireGuard."
-    echo "1) VLESS, Shadowsocks (A sing-box will be installed)"
+    echo "1) VLESS, Shadowsocks (sing-box-extended will be installed)"
     echo "2) Wireguard"
     echo "3) AmneziaWG"
     echo "4) OpenVPN"
@@ -111,7 +141,7 @@ add_tunnel() {
         case $TUNNEL in
 
         1)
-            opkg install sing-box
+            install_singbox_extended
             break
             ;;
 

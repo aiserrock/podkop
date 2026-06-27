@@ -32,8 +32,13 @@ sh <(wget -O - https://raw.githubusercontent.com/aiserrock/podkop/main/install.s
 Команда скачивает `install.sh` из этого форка, который ставит последний релиз
 `podkop_*.ipk` + `luci-app-podkop_*.ipk` из
 [releases этого репозитория](https://github.com/aiserrock/podkop/releases/latest),
-доставит зависимости (`dnsmasq-full`, при proxy-режиме — `sing-box`) и предложит
-выбрать туннель.
+доставит зависимости (`dnsmasq-full`) и предложит выбрать туннель.
+
+> При выборе VLESS/Shadowsocks устанавливается **sing-box-extended** (последняя
+> версия) через установщик
+> [EikeiDev/OpenWRT-sing-box-extended](https://github.com/EikeiDev/OpenWRT-sing-box-extended),
+> а не обычный `sing-box` из opkg. Если установщик extended недоступен —
+> откат на обычный `opkg install sing-box`.
 
 > Для установки одной командой в репозитории `aiserrock/podkop` должен быть
 > хотя бы один релиз. Релиз собирается автоматически при пуше тега (см.
