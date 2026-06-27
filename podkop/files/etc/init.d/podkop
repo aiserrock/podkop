@@ -7,7 +7,7 @@ script=$(readlink "$initscript")
 NAME="$(basename ${script:-$initscript})"
 config_load "$NAME"
 
-EXTRA_COMMANDS="list_update add_route_interface check_proxy check_nft check_github check_logs check_all check_three"
+EXTRA_COMMANDS="list_update add_route_interface check_proxy check_nft check_github check_logs check_all check_three backup restore show_debug_log"
 EXTRA_HELP="        list_update     Updating domain and subnet lists
         add_route_interface  Adding route for interface
         sing_box_config_vless For test vless string
@@ -16,7 +16,10 @@ EXTRA_HELP="        list_update     Updating domain and subnet lists
         check_github        Check GitHub connectivity and lists availability
         check_logs         Show podkop logs from system journal
         check_all          Run all checks
-        check_three         Run check_proxy, check_nft and check_github"
+        check_three         Run check_proxy, check_nft and check_github
+        backup              Print current podkop config to stdout
+        restore <file>      Restore podkop config from a file
+        show_debug_log      Show the full debug log (/tmp/podkop.log)"
 
 [ ! -L /usr/sbin/podkop ] && ln -s /etc/init.d/podkop /usr/sbin/podkop
 
@@ -37,11 +40,23 @@ cron_job="${update_interval} /etc/init.d/podkop list_update"
 start_service() {
     log "Start podkop"
 
+    # Reset the debug log on each (re)start so it reflects the current session.
+    config_get log_level "main" "log_level" "normal"
+    if [ "$log_level" = "debug" ]; then
+        : > "$DEBUG_LOG"
+        debug "=== podkop start (debug logging enabled) ==="
+        config_get_bool _se "second" "second_enable" "0"
+        config_get_bool _te "third" "third_enable" "0"
+        config_get_bool _dvm "main" "download_via_main" "0"
+        debug "config: main_mode=$(uci -q get podkop.main.mode) second_enable=$_se third_enable=$_te download_via_main=$_dvm"
+    fi
+
     dnsmasqfull
     routing_table_create
     add_mark
 
     config_get mode "main" "mode"
+    debug "main mode resolved: '$mode'"
     case "$mode" in
     "vpn")
         log "VPN mode"
@@ -161,6 +176,7 @@ start_service() {
             # Multi-chain proxy: build one sing-box config with N tproxy
             # inbounds + N tagged outbounds + N inbound->outbound route rules.
             log "Multi proxy enable"
+            debug "proxy mode: building chains main$([ "$second_proxy" -eq 1 ] && echo "+second")$([ "$third_proxy" -eq 1 ] && echo "+third")"
 
             outbound_main=$(mktemp)
             sing_box_build_proxy_outbound "main" "main" "1602" "$outbound_main" || return
@@ -326,6 +342,7 @@ start_service() {
 
 stop_service() {
     log "Stopping the podkop"
+    debug "=== podkop stop ==="
     rm -f /tmp/dnsmasq.d/podkop*
     remove_cron_job
 
@@ -405,6 +422,23 @@ nolog() {
     local RESET="\033[0m"
 
     echo -e "${CYAN}[$timestamp]${RESET} ${GREEN}$message${RESET}"
+}
+
+# Path of the full debug log file (only written when log_level=debug).
+DEBUG_LOG="/tmp/podkop.log"
+
+# debug() emits a verbose message only when option log_level=debug. It goes to
+# the system journal (priority debug) and to $DEBUG_LOG so the full history
+# survives syslog rotation. With log_level=normal (default) it is a no-op, so
+# normal-mode behavior is unchanged from the previous implementation.
+debug() {
+    local message="$1"
+    config_get log_level "main" "log_level" "normal"
+    [ "$log_level" = "debug" ] || return 0
+
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    logger -t "podkop" -p daemon.debug "$timestamp [DEBUG] $message"
+    echo "[$timestamp] [DEBUG] $message" >>"$DEBUG_LOG"
 }
 
 add_cron_job() {
@@ -632,6 +666,7 @@ add_set() {
 
     nft add table inet PodkopTable
     log "Create set $set_name"
+    debug "add_set: set=$set_name connect=$connect"
     nft add chain inet PodkopTable mangle { type filter hook prerouting priority -150 \; policy accept \;}
     nft add set inet PodkopTable "$set_name" { type ipv4_addr\; flags interval\; auto-merge\; }
     if [ "$connect" = "main" ]; then
@@ -791,6 +826,7 @@ setup_download_proxy() {
     fi
 
     log "Download lists via main tunnel: local socks inbound 127.0.0.1:$DOWNLOAD_PROXY_PORT -> main"
+    debug "setup_download_proxy: adding lists-download inbound on 127.0.0.1:$DOWNLOAD_PROXY_PORT -> main outbound"
     jq --arg tag "main" --argjson port "$DOWNLOAD_PROXY_PORT" '
         (.outbounds[0].tag) //= $tag
         | .inbounds += [{
@@ -809,6 +845,7 @@ setup_download_proxy() {
     /etc/init.d/sing-box restart
     # Give sing-box a moment to bring the inbound up before the first fetch.
     sleep 2
+    debug "setup_download_proxy: sing-box restarted, inbound should be up"
 }
 
 # Returns 0 if list downloads should be routed through the main tunnel:
@@ -842,9 +879,11 @@ dl_get() {
     local out="$2"
 
     if dl_via_main; then
+        debug "dl_get: fetching via main tunnel: $url -> $out"
         local attempt
         for attempt in 1 2 3; do
             if curl -s -m 30 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o "$out" "$url" 2>/dev/null; then
+                debug "dl_get: tunnel fetch ok (attempt $attempt): $url"
                 return 0
             fi
             log "Download via main tunnel failed (attempt $attempt/3) for $url"
@@ -853,9 +892,15 @@ dl_get() {
             [ "$attempt" -eq 2 ] && sleep 20
         done
         log "Main tunnel unavailable after 3 attempts, falling back to direct for $url"
+        debug "dl_get: falling back to direct wget for $url"
+    else
+        debug "dl_get: fetching direct (tunnel disabled/unavailable): $url -> $out"
     fi
 
     wget -q -O "$out" "$url"
+    local rc=$?
+    debug "dl_get: direct wget exit=$rc for $url"
+    return $rc
 }
 
 # Validate that a URL is reachable, via the main tunnel when enabled.
@@ -1458,14 +1503,88 @@ check_github() {
 
 check_logs() {
     nolog "Showing podkop logs from system journal..."
-    
+
+    # Show more lines when debug logging is enabled.
+    config_get log_level "main" "log_level" "normal"
+    local lines=50
+    [ "$log_level" = "debug" ] && lines=300
+
     if command -v logread >/dev/null 2>&1; then
-        # Попытка получить последние 50 записей
-        logread -e "podkop" | tail -n 50
+        logread -e "podkop" | tail -n "$lines"
     else
         nolog "Error: logread command not found"
         return 1
     fi
+}
+
+# Print the full debug log file (written only when log_level=debug).
+show_debug_log() {
+    if [ -f "$DEBUG_LOG" ]; then
+        cat "$DEBUG_LOG"
+    else
+        nolog "Debug log $DEBUG_LOG not found. Enable Log level = debug in settings and restart podkop."
+    fi
+}
+
+# Print the current podkop UCI config to stdout (consumed by the LuCI Backup
+# button, which turns it into a downloadable file).
+backup() {
+    if [ -f /etc/config/podkop ]; then
+        cat /etc/config/podkop
+    else
+        nolog "Config /etc/config/podkop not found"
+        return 1
+    fi
+}
+
+# Restore the podkop config from a file. Validates that the file looks like a
+# podkop UCI config (has a 'config main' section) before replacing the live
+# config; keeps a timestamped backup of the previous config and reloads podkop.
+# Args: path to the config file to restore from.
+restore() {
+    # Source path is fixed: the LuCI Restore button writes the uploaded file to
+    # exactly this path (the ACL also grants write only here). Ignoring $1 keeps
+    # the exec grant from being usable to copy an arbitrary on-router file over
+    # the live config.
+    local src="/tmp/podkop-restore.conf"
+
+    if [ ! -f "$src" ]; then
+        nolog "Restore: file not found: $src"
+        return 1
+    fi
+
+    # Basic validation: must contain a podkop main section.
+    if ! grep -qE "^config main 'main'|^config main main" "$src"; then
+        nolog "Restore: '$src' does not look like a podkop config (no 'config main'). Aborted."
+        return 1
+    fi
+
+    # Validate UCI syntax in an isolated config dir so live UCI state is never
+    # touched. mktemp -d creates the dir atomically (0700, fails on a planted
+    # symlink/collision), avoiding a predictable-name race in world-writable /tmp.
+    if command -v uci >/dev/null 2>&1; then
+        local checkdir
+        checkdir=$(mktemp -d /tmp/podkop-restore-check.XXXXXX) || {
+            nolog "Restore: cannot create temp dir. Aborted."
+            return 1
+        }
+        if ! cp "$src" "$checkdir/podkop" 2>/dev/null || ! uci -c "$checkdir" -q show podkop >/dev/null 2>&1; then
+            nolog "Restore: '$src' is not valid UCI syntax. Aborted."
+            rm -rf "$checkdir"
+            return 1
+        fi
+        rm -rf "$checkdir"
+    fi
+
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    cp /etc/config/podkop "/etc/config/podkop.bak-${ts}" 2>/dev/null
+    nolog "Restore: previous config saved to /etc/config/podkop.bak-${ts}"
+
+    cp "$src" /etc/config/podkop
+    nolog "Restore: config applied. Reloading podkop..."
+    /etc/init.d/podkop restart
+    nolog "Restore: done"
 }
 
 check_three() {

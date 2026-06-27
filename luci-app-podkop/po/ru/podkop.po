@@ -16,6 +16,69 @@ msgstr "Качать списки через основной туннель"
 msgid "Fetch remote domain/subnet lists through the main proxy tunnel (useful when GitHub is blocked by your ISP)"
 msgstr "Загружать списки доменов/подсетей через основной прокси-туннель (полезно, когда GitHub заблокирован провайдером)"
 
+msgid "Log Level"
+msgstr "Уровень логов"
+
+msgid "Debug enables verbose logging to the system log and /tmp/podkop.log"
+msgstr "Debug включает подробное логирование в системный журнал и /tmp/podkop.log"
+
+msgid "Normal"
+msgstr "Обычный"
+
+msgid "Debug (verbose)"
+msgstr "Отладочный (подробный)"
+
+msgid "Debug Log"
+msgstr "Лог отладки"
+
+msgid "View the full debug log (only populated when Log Level = Debug)"
+msgstr "Показать полный лог отладки (заполняется только при Уровне логов = Debug)"
+
+msgid "View Debug Log"
+msgstr "Показать лог отладки"
+
+msgid "Backup configuration"
+msgstr "Резервная копия конфигурации"
+
+msgid "Download the current podkop configuration as a file"
+msgstr "Скачать текущую конфигурацию podkop файлом"
+
+msgid "Backup"
+msgstr "Бэкап"
+
+msgid "Backup downloaded."
+msgstr "Бэкап скачан."
+
+msgid "Backup failed: "
+msgstr "Ошибка бэкапа: "
+
+msgid "Restore configuration"
+msgstr "Восстановить конфигурацию"
+
+msgid "Upload a podkop backup file and apply it (the current config is saved first)"
+msgstr "Загрузить файл бэкапа podkop и применить его (текущая конфигурация сохраняется)"
+
+msgid "Restore"
+msgstr "Восстановить"
+
+msgid "This file does not look like a podkop config. Aborted."
+msgstr "Этот файл не похож на конфигурацию podkop. Отменено."
+
+msgid "Restoring configuration"
+msgstr "Восстановление конфигурации"
+
+msgid "Applying configuration and reloading podkop..."
+msgstr "Применение конфигурации и перезапуск podkop..."
+
+msgid "Configuration restored. Reloading page..."
+msgstr "Конфигурация восстановлена. Перезагрузка страницы..."
+
+msgid "Restore failed: "
+msgstr "Ошибка восстановления: "
+
+msgid "Restore error: "
+msgstr "Ошибка восстановления: "
+
 msgid "Secondary Config"
 msgstr "Второй маршрут"
 

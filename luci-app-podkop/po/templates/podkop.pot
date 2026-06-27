@@ -16,6 +16,69 @@ msgstr ""
 msgid "Fetch remote domain/subnet lists through the main proxy tunnel (useful when GitHub is blocked by your ISP)"
 msgstr ""
 
+msgid "Log Level"
+msgstr ""
+
+msgid "Debug enables verbose logging to the system log and /tmp/podkop.log"
+msgstr ""
+
+msgid "Normal"
+msgstr ""
+
+msgid "Debug (verbose)"
+msgstr ""
+
+msgid "Debug Log"
+msgstr ""
+
+msgid "View the full debug log (only populated when Log Level = Debug)"
+msgstr ""
+
+msgid "View Debug Log"
+msgstr ""
+
+msgid "Backup configuration"
+msgstr ""
+
+msgid "Download the current podkop configuration as a file"
+msgstr ""
+
+msgid "Backup"
+msgstr ""
+
+msgid "Backup downloaded."
+msgstr ""
+
+msgid "Backup failed: "
+msgstr ""
+
+msgid "Restore configuration"
+msgstr ""
+
+msgid "Upload a podkop backup file and apply it (the current config is saved first)"
+msgstr ""
+
+msgid "Restore"
+msgstr ""
+
+msgid "This file does not look like a podkop config. Aborted."
+msgstr ""
+
+msgid "Restoring configuration"
+msgstr ""
+
+msgid "Applying configuration and reloading podkop..."
+msgstr ""
+
+msgid "Configuration restored. Reloading page..."
+msgstr ""
+
+msgid "Restore failed: "
+msgstr ""
+
+msgid "Restore error: "
+msgstr ""
+
 msgid "Secondary Config"
 msgstr ""
 

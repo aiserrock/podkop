@@ -30,6 +30,7 @@ config main 'main'
 	option socks5 '0'
 	option download_via_main '0'
 	option exclude_ntp '0'
+	option log_level 'normal'
 	option update_interval ''
 	option custom_domains_text
 

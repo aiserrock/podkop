@@ -426,6 +426,13 @@ return view.extend({
         o.rmempty = false;
         o.ucisection = 'main';
 
+        o = s.taboption('additional', form.ListValue, 'log_level', _('Log Level'), _('Debug enables verbose logging to the system log and /tmp/podkop.log'));
+        o.value('normal', _('Normal'));
+        o.value('debug', _('Debug (verbose)'));
+        o.default = 'normal';
+        o.rmempty = false;
+        o.ucisection = 'main';
+
         o = s.taboption('additional', form.ListValue, 'update_interval', _('List Update Frequency'), _('Select how often the lists will be updated'));
         o.value('0 */1 * * *', _('Every hour'));
         o.value('0 */2 * * *', _('Every 2 hours'));
@@ -1035,6 +1042,129 @@ return view.extend({
                     }, _('Close'))
                 ])
             ]);
+        };
+
+        // View Debug Log
+        o = s.taboption('diagnostics', form.Button, '_show_debug_log');
+        o.title = _('Debug Log');
+        o.description = _('View the full debug log (only populated when Log Level = Debug)');
+        o.inputtitle = _('View Debug Log');
+        o.inputstyle = 'apply';
+        o.onclick = function () {
+            return fs.exec('/etc/init.d/podkop', ['show_debug_log'])
+                .then(function (res) {
+                    // Show the debug log raw (only strip ANSI escapes) so the
+                    // per-line timestamps — the whole point of the log — survive.
+                    const formattedOutput = (res.stdout || _('No output')).replace(/\x1B\[[0-9;]*[mK]/g, '');
+
+                    const modalElement = ui.showModal(_('Debug Log'), [
+                        E('div', {
+                            style:
+                                'max-height: 70vh;' +
+                                'overflow-y: auto;' +
+                                'margin: 1em 0;' +
+                                'padding: 1.5em;' +
+                                'background: #f8f9fa;' +
+                                'border: 1px solid #e9ecef;' +
+                                'border-radius: 4px;' +
+                                'font-family: monospace;' +
+                                'white-space: pre-wrap;' +
+                                'word-wrap: break-word;' +
+                                'line-height: 1.5;' +
+                                'font-size: 14px;'
+                        }, [
+                            E('pre', { style: 'margin: 0;' }, formattedOutput)
+                        ]),
+                        E('div', { class: 'right' }, [
+                            E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close'))
+                        ])
+                    ], 'large');
+
+                    if (modalElement && modalElement.parentElement) {
+                        modalElement.parentElement.style.width = '90%';
+                        modalElement.parentElement.style.maxWidth = '1200px';
+                        modalElement.parentElement.style.margin = '2rem auto';
+                    }
+                });
+        };
+
+        // Backup configuration -> download as a file in the browser
+        o = s.taboption('diagnostics', form.Button, '_backup');
+        o.title = _('Backup configuration');
+        o.description = _('Download the current podkop configuration as a file');
+        o.inputtitle = _('Backup');
+        o.inputstyle = 'apply';
+        o.onclick = function () {
+            return fs.exec('/etc/init.d/podkop', ['backup'])
+                .then(function (res) {
+                    if (res.code !== 0 || !res.stdout) {
+                        ui.addNotification(null, E('p', {}, _('Backup failed: ') + (res.stderr || _('no output'))));
+                        return;
+                    }
+                    const blob = new Blob([res.stdout], { type: 'text/plain' });
+                    const url = window.URL.createObjectURL(blob);
+                    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'podkop-backup-' + ts + '.conf';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
+                    ui.addNotification(null, E('p', {}, _('Backup downloaded.')), 'info');
+                });
+        };
+
+        // Restore configuration <- upload a file and apply it on the router
+        o = s.taboption('diagnostics', form.Button, '_restore');
+        o.title = _('Restore configuration');
+        o.description = _('Upload a podkop backup file and apply it (the current config is saved first)');
+        o.inputtitle = _('Restore');
+        o.inputstyle = 'apply';
+        o.onclick = function () {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.conf,text/plain';
+            input.style.display = 'none';
+            document.body.appendChild(input);
+            input.onchange = function () {
+                const file = input.files && input.files[0];
+                document.body.removeChild(input);
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = function () {
+                    const content = reader.result;
+                    if (!content || content.indexOf('config main') === -1) {
+                        ui.addNotification(null, E('p', {}, _('This file does not look like a podkop config. Aborted.')));
+                        return;
+                    }
+                    const tmpPath = '/tmp/podkop-restore.conf';
+                    ui.showModal(_('Restoring configuration'), [
+                        E('p', { class: 'spinning' }, _('Applying configuration and reloading podkop...'))
+                    ]);
+                    fs.write(tmpPath, content)
+                        .then(function () {
+                            return fs.exec('/etc/init.d/podkop', ['restore', tmpPath]);
+                        })
+                        .then(function (res) {
+                            ui.hideModal();
+                            const out = (res.stdout || '') + (res.stderr || '');
+                            if (res.code === 0) {
+                                ui.addNotification(null, E('p', {}, _('Configuration restored. Reloading page...')), 'info');
+                                window.setTimeout(function () { location.reload(); }, 2000);
+                            } else {
+                                ui.addNotification(null, E('p', {}, _('Restore failed: ') + out));
+                            }
+                        })
+                        .catch(function (e) {
+                            ui.hideModal();
+                            ui.addNotification(null, E('p', {}, _('Restore error: ') + e.message));
+                        });
+                };
+                reader.readAsText(file);
+            };
+            input.click();
         };
 
         return m.render();

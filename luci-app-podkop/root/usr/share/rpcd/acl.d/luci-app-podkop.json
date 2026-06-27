@@ -17,6 +17,11 @@
       ]
     },
     "write": {
+      "file": {
+        "/tmp/podkop-restore.conf": [
+          "write"
+        ]
+      },
       "uci": [
         "podkop"
       ]
