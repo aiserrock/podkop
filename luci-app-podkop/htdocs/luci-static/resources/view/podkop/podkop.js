@@ -414,6 +414,12 @@ return view.extend({
         o.rmempty = false;
         o.ucisection = 'main';
 
+        o = s.taboption('additional', form.Flag, 'download_via_main', _('Download lists via main tunnel'), _('Fetch remote domain/subnet lists through the main proxy tunnel (useful when GitHub is blocked by your ISP)'));
+        o.default = '0';
+        o.depends('mode', 'proxy');
+        o.rmempty = false;
+        o.ucisection = 'main';
+
         o = s.taboption('additional', form.Flag, 'exclude_ntp', _('Exclude NTP'), _('For issues with open connections sing-box'));
         o.default = '0';
         o.depends('mode', 'proxy');

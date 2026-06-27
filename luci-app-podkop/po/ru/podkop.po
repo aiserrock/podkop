@@ -10,6 +10,12 @@ msgstr "Основные настройки"
 msgid "Additional Settings"
 msgstr "Дополнительные настройки"
 
+msgid "Download lists via main tunnel"
+msgstr "Качать списки через основной туннель"
+
+msgid "Fetch remote domain/subnet lists through the main proxy tunnel (useful when GitHub is blocked by your ISP)"
+msgstr "Загружать списки доменов/подсетей через основной прокси-туннель (полезно, когда GitHub заблокирован провайдером)"
+
 msgid "Secondary Config"
 msgstr "Второй маршрут"
 

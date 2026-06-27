@@ -29,6 +29,7 @@ SUBNETS_TWITTER="${GITHUB_RAW_URL}/Subnets/IPv4/Twitter.lst"
 SUBNETS_META="${GITHUB_RAW_URL}/Subnets/IPv4/Meta.lst"
 SUBNETS_DISCORD="${GITHUB_RAW_URL}/Subnets/IPv4/Discord.lst"
 SING_BOX_CONFIG="/etc/sing-box/config.json"
+DOWNLOAD_PROXY_PORT="2081"
 
 config_get update_interval "main" "update_interval" "0 4 * * *"
 cron_job="${update_interval} /etc/init.d/podkop list_update"
@@ -273,6 +274,10 @@ start_service() {
         return
         ;;
     esac
+
+    # Set up the local list-download tunnel inbound BEFORE list_update, so the
+    # first list fetch at boot can already go through the main tunnel.
+    setup_download_proxy
 
     list_update
 
@@ -764,6 +769,91 @@ add_mark() {
     fi
 }
 
+# Add a loopback-only sing-box mixed inbound (127.0.0.1:$DOWNLOAD_PROXY_PORT,
+# tag lists-download) routed explicitly to the main outbound, so list downloads
+# can go through the main VLESS tunnel. Only acts when download_via_main=1 and
+# main is in proxy mode (sing-box running with a main outbound).
+setup_download_proxy() {
+    config_get_bool download_via_main "main" "download_via_main" "0"
+    [ "$download_via_main" -eq 1 ] || return 0
+    config_get mode "main" "mode"
+    [ "$mode" = "proxy" ] || return 0
+    [ -f "$SING_BOX_CONFIG" ] || return 0
+
+    # Idempotent: skip if the lists-download inbound is already present.
+    if jq -e '.inbounds[]? | select(.tag == "lists-download")' $SING_BOX_CONFIG >/dev/null 2>&1; then
+        log "Download tunnel inbound already present"
+        return 0
+    fi
+
+    log "Download lists via main tunnel: local socks inbound 127.0.0.1:$DOWNLOAD_PROXY_PORT -> main"
+    jq --arg tag "main" --argjson port "$DOWNLOAD_PROXY_PORT" '
+        (.outbounds[0].tag) //= $tag
+        | .inbounds += [{
+            "type": "mixed",
+            "listen": "127.0.0.1",
+            "listen_port": $port,
+            "set_system_proxy": false,
+            "tag": "lists-download"
+          }]
+        | .route.rules = ((.route.rules // []) + [{
+            "inbound": "lists-download",
+            "outbound": "main"
+          }])
+    ' $SING_BOX_CONFIG >/tmp/sing-box-config-tmp.json && mv /tmp/sing-box-config-tmp.json $SING_BOX_CONFIG
+    sing_box_config_check
+    /etc/init.d/sing-box restart
+    # Give sing-box a moment to bring the inbound up before the first fetch.
+    sleep 2
+}
+
+# Returns 0 if list downloads should be routed through the main tunnel:
+# the download_via_main option is on, main is in proxy mode, and the local
+# socks inbound is actually listening.
+dl_via_main() {
+    config_get_bool download_via_main "main" "download_via_main" "0"
+    [ "$download_via_main" -eq 1 ] || return 1
+    config_get mode "main" "mode"
+    [ "$mode" = "proxy" ] || return 1
+    # Probe the local inbound; if it's not up yet, fall back to direct.
+    curl -s -m 3 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null github.com 2>/dev/null
+}
+
+# Connectivity probe to github, via tunnel when enabled, else direct.
+dl_github_ok() {
+    if dl_via_main; then
+        curl -s -m 5 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null github.com 2>/dev/null
+    else
+        curl -m 3 github.com
+    fi
+}
+
+# Fetch a URL to a file. When download_via_main is on, try the main tunnel up
+# to 3 times with increasing backoff (~1 minute total) before falling back to a
+# direct download. This avoids leaking a direct request on a transient tunnel
+# failure while not hanging forever if the tunnel is truly dead.
+# Args: url out_file
+dl_get() {
+    local url="$1"
+    local out="$2"
+
+    if dl_via_main; then
+        local attempt
+        for attempt in 1 2 3; do
+            if curl -s -m 30 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o "$out" "$url" 2>/dev/null; then
+                return 0
+            fi
+            log "Download via main tunnel failed (attempt $attempt/3) for $url"
+            # backoff after attempts 1 and 2: 10s, then 20s (~30s + curl timeouts)
+            [ "$attempt" -eq 1 ] && sleep 10
+            [ "$attempt" -eq 2 ] && sleep 20
+        done
+        log "Main tunnel unavailable after 3 attempts, falling back to direct for $url"
+    fi
+
+    wget -q -O "$out" "$url"
+}
+
 lists_domains_download() {
     local URL="$1"
 
@@ -785,8 +875,8 @@ lists_domains_download() {
 
     count=0
     while true; do
-        if curl -m 3 github.com; then
-            wget -q -O /tmp/dnsmasq.d/podkop-domains.lst $URL
+        if dl_github_ok; then
+            dl_get "$URL" /tmp/dnsmasq.d/podkop-domains.lst
             if [ $? -eq 0 ]; then
                 sed -i 's/fw4#vpn_domains/PodkopTable#podkop_domains/g' /tmp/dnsmasq.d/podkop-domains.lst
                 return 0
@@ -826,8 +916,8 @@ lists_services_download() {
 
     count=0
     while true; do
-        if ping -c 1 -W 3 github.com >/dev/null 2>&1; then
-            wget -q -O /tmp/dnsmasq.d/${name}-domains.lst $URL
+        if dl_github_ok; then
+            dl_get "$URL" /tmp/dnsmasq.d/${name}-domains.lst
             if [ $? -eq 0 ]; then
                 delist_downloaded_domains "$name"
                 sed -i "s/.*/nftset=\/&\/4#inet#PodkopTable#${name}_domains/g" /tmp/dnsmasq.d/${name}-domains.lst
@@ -878,7 +968,7 @@ list_subnets_download() {
 
     local filename=$(basename "$URL")
     mkdir -p /tmp/podkop
-    wget -q -O "/tmp/podkop/$filename" "$URL"
+    dl_get "$URL" "/tmp/podkop/$filename"
     while IFS= read -r subnet; do
         nft add element inet PodkopTable podkop_subnets { $subnet }
     done <"/tmp/podkop/$filename"
@@ -912,7 +1002,7 @@ list_custom_download_domains_create() {
 
     rm -f "$config"
     mkdir -p /tmp/podkop
-    wget -q -O "/tmp/podkop/${filename}" "$URL"
+    dl_get "$URL" "/tmp/podkop/${filename}"
     while IFS= read -r domain; do
         echo "nftset=/$domain/4#inet#PodkopTable#${name}_domains" >>$config
     done <"/tmp/podkop/$filename"
