@@ -35,6 +35,15 @@ SUBNETS_META="${GITHUB_RAW_URL}/Subnets/IPv4/Meta.lst"
 SUBNETS_DISCORD="${GITHUB_RAW_URL}/Subnets/IPv4/Discord.lst"
 SING_BOX_CONFIG="/etc/sing-box/config.json"
 DOWNLOAD_PROXY_PORT="2081"
+# sing-box 1.13 defaults TCP keep-alive to 5m initial / 75s interval and keeps
+# UDP NAT sessions alive for minutes. On low-RAM routers a flaky upstream that
+# resets connections makes clients reconnect faster than dead sockets are
+# reaped, so half-open connections pile up until the OOM killer takes sing-box
+# down (which drops all routing). Tighten the timeouts so dead sockets are
+# closed within ~30s and UDP (QUIC/YouTube) sessions don't linger.
+SB_TCP_KEEP_ALIVE="30s"
+SB_TCP_KEEP_ALIVE_INTERVAL="15s"
+SB_UDP_TIMEOUT="60s"
 # Replaced at build time by the Makefile (sed VERSION_FROM_MAKEFILE -> PKG_VERSION).
 PODKOP_VERSION="VERSION_FROM_MAKEFILE"
 
@@ -1403,7 +1412,33 @@ sing_box_config_vless() {
     fi
 }
 
+# Apply tightened TCP keep-alive / UDP timeout to every tproxy inbound in the
+# generated config. Centralised here because tproxy inbounds are emitted from
+# several code paths (single/multi chain, vpn sub-chains); running one jq pass
+# right before the validity check covers them all and any future ones.
+# Idempotent: re-applying just overwrites the same fields.
+sing_box_tune_inbounds() {
+    [ -f "$SING_BOX_CONFIG" ] || return 0
+    jq \
+        --arg ka "$SB_TCP_KEEP_ALIVE" \
+        --arg kai "$SB_TCP_KEEP_ALIVE_INTERVAL" \
+        --arg ut "$SB_UDP_TIMEOUT" '
+        (.inbounds[]? | select(.type == "tproxy")) |= (
+            . + {
+                "tcp_fast_open": false,
+                "tcp_multi_path": false,
+                "tcp_keep_alive": $ka,
+                "tcp_keep_alive_interval": $kai,
+                "udp_timeout": $ut
+            }
+        )
+    ' "$SING_BOX_CONFIG" > /tmp/sing-box-tune-tmp.json 2>/dev/null &&
+        mv /tmp/sing-box-tune-tmp.json "$SING_BOX_CONFIG" ||
+        rm -f /tmp/sing-box-tune-tmp.json
+}
+
 sing_box_config_check() {
+    sing_box_tune_inbounds
     if ! sing-box -c $SING_BOX_CONFIG check >/dev/null 2>&1; then
         log "Sing-box configuration is invalid"
         return
