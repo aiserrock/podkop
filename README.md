@@ -194,6 +194,8 @@ uuid, пароли) в логи не попадают.
 - [x] Backup / Restore конфигурации (кнопки в Diagnostics, файл в браузере).
 - [x] Уровень логов normal/debug + просмотр полного лога в Diagnostics.
 - [x] Отображение установленных версий (podkop, sing-box, LuCI, OpenWrt) вверху Diagnostics.
+- [x] Установка sing-box-extended (latest) вместо стокового sing-box.
+- [x] Защита от OOM на роутерах с малым ОЗУ: ужат TCP keep-alive / UDP timeout у tproxy-инбаундов, чтобы мёртвые соединения не копились и не убивали sing-box.
 
 Сделано
 - [x] Скрипт для автоматической установки.
