@@ -856,9 +856,20 @@ setup_download_proxy() {
     ' $SING_BOX_CONFIG >/tmp/sing-box-config-tmp.json && mv /tmp/sing-box-config-tmp.json $SING_BOX_CONFIG
     sing_box_config_check
     /etc/init.d/sing-box restart
-    # Give sing-box a moment to bring the inbound up before the first fetch.
-    sleep 2
-    debug "setup_download_proxy: sing-box restarted, inbound should be up"
+    # Actively wait for the socks inbound to accept connections before the first
+    # fetch. A blind `sleep 2` was not enough right after a restart on slower
+    # routers: the first (telegram) list would probe a cold tunnel, dl_spider
+    # would report the URL "not valid" and skip it. Poll for up to ~15s.
+    local wait
+    for wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if curl -s -m 2 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null github.com 2>/dev/null; then
+            debug "setup_download_proxy: tunnel inbound ready after ${wait}s"
+            return 0
+        fi
+        sleep 1
+    done
+    log "Download tunnel inbound not ready after 15s; downloads may fall back to direct"
+    debug "setup_download_proxy: sing-box restarted but inbound not confirmed up"
 }
 
 # Returns 0 if list downloads should be routed through the main tunnel:
@@ -918,10 +929,19 @@ dl_get() {
 
 # Validate that a URL is reachable, via the main tunnel when enabled.
 # Returns 0 if reachable. Args: url
+# Retries a few times: a single probe against a freshly-restarted tunnel could
+# transiently fail and make a valid list URL get skipped entirely (telegram bug).
 dl_spider() {
     local url="$1"
+    local attempt
     if dl_via_main; then
-        curl -s -m 10 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null "$url" 2>/dev/null
+        for attempt in 1 2 3; do
+            if curl -s -m 10 --socks5 127.0.0.1:$DOWNLOAD_PROXY_PORT -o /dev/null "$url" 2>/dev/null; then
+                return 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 3
+        done
+        return 1
     else
         wget -q --spider "$url"
     fi
@@ -1041,10 +1061,26 @@ list_subnets_download() {
 
     local filename=$(basename "$URL")
     mkdir -p /tmp/podkop
-    dl_get "$URL" "/tmp/podkop/$filename"
+    local dest="/tmp/podkop/$filename"
+
+    # Download to a temp file first, so a failed/truncated fetch does not clobber
+    # the last known-good list. Only replace and load into nft if the new file
+    # actually contains at least one CIDR — otherwise keep whatever we already
+    # have in the set (avoids silently dropping e.g. all telegram subnets when a
+    # download fails or returns an empty body).
+    local tmp="${dest}.new"
+    dl_get "$URL" "$tmp"
+    if ! grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}[[:space:]]*$' "$tmp" 2>/dev/null; then
+        log "Subnet list $filename empty or invalid after download, keeping previous set entries"
+        rm -f "$tmp"
+        return
+    fi
+    mv "$tmp" "$dest"
+
     while IFS= read -r subnet; do
-        nft add element inet PodkopTable podkop_subnets { $subnet }
-    done <"/tmp/podkop/$filename"
+        [ -n "$subnet" ] || continue
+        nft add element inet PodkopTable podkop_subnets { $subnet } 2>/dev/null
+    done <"$dest"
 }
 
 list_custom_domains_create() {
