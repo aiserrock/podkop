@@ -59,7 +59,7 @@ sh <(wget -O - https://raw.githubusercontent.com/aiserrock/podkop/main/install.s
 # Обновление
 Та же самая команда, что для установки. Скрипт обнаружит уже установленный podkop и предложит обновиться.
 ```
-sh <(wget -O - https://raw.githubusercontent.com/aiserrock/podkop/main/install.sh)
+sh <(wget -O - https://raw.githubusercontent.com/aiserrock/podkop/development/install.sh)
 ```
 
 # Сборка релиза (для мейнтейнера форка)
