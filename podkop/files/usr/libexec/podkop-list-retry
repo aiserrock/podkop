@@ -1,0 +1,87 @@
+#!/bin/sh
+# Background list refresher for podkop.
+#
+# Started by podkop when a list download fails during startup. Routing is
+# already up by then (from cached lists), so this only needs to wait for
+# connectivity and refresh the lists once it returns.
+#
+# Single instance: repeated tunnel flaps must not spawn a process each time.
+#
+# IMPORTANT: rc.common wraps every podkop action in a procd flock on fd 1000,
+# and this script is spawned *by* podkop while that lock is held. A child
+# inherits the open descriptor, so it keeps the lock alive and then blocks on
+# it forever — a self-deadlock. Closing fd 1000 first (exec 1000>&-) is what
+# makes the later `podkop list_update` call possible at all.
+# Sourcing the init script instead is NOT an option: it re-runs procd
+# service_triggers and deadlocks the same way.
+
+# Drop the inherited procd lock descriptor before doing anything else.
+# shellcheck disable=SC3023  # fd 1000 is procd's own convention; ash supports it
+exec 1000>&- 2>/dev/null || true
+
+LOCK="/var/run/podkop-list-retry.lock"
+MAX_WAIT=1800   # give up after ~30 min; the 4am cron job remains the backstop
+INTERVAL=60
+# Wait for the spawning start_service to release the procd lock before we
+# touch any shared state.
+STARTUP_GRACE=30
+
+log() { logger -t podkop-retry "$1"; }
+
+PROCD_LOCK="/tmp/lock/procd_podkop.lock"
+
+# True once no other podkop action holds the procd lock. Without this the
+# list_update call below would block behind the very startup that spawned us.
+wait_for_lock() {
+    local tries=0
+    while [ "$tries" -lt 20 ]; do
+        if ! flock -n "$PROCD_LOCK" true 2>/dev/null; then
+            tries=$((tries + 1))
+            sleep 15
+            continue
+        fi
+        return 0
+    done
+    return 1
+}
+
+# mkdir is atomic on every filesystem we care about, unlike -e checks.
+if ! mkdir "$LOCK" 2>/dev/null; then
+    exit 0
+fi
+# Stale lock protection: a reboot mid-retry would otherwise block forever.
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+
+log "waiting for connectivity to refresh lists"
+
+# Let the podkop startup that spawned us finish and drop the procd lock.
+sleep "$STARTUP_GRACE"
+
+waited="$STARTUP_GRACE"
+while [ "$waited" -lt "$MAX_WAIT" ]; do
+    sleep "$INTERVAL"
+    waited=$((waited + INTERVAL))
+
+    # Probe the same endpoint the downloads use. Direct, not via tunnel: if the
+    # tunnel is the thing that is broken, lists still need to arrive somehow.
+    if curl -s -m 10 -o /dev/null https://raw.githubusercontent.com 2>/dev/null; then
+        log "connectivity restored after ${waited}s, refreshing lists"
+
+        # Wait until the podkop run that spawned us has released the procd lock.
+        if ! wait_for_lock; then
+            log "podkop still busy after waiting, will retry on the next tick"
+            continue
+        fi
+
+        # Generous budget: off the boot path, so a slow fetch costs nothing.
+        if LIST_BUDGET_TOTAL=600 /etc/init.d/podkop list_update >/dev/null 2>&1; then
+            log "lists refreshed successfully"
+            rm -f /var/run/podkop-lists-stale
+        else
+            log "list refresh failed, leaving cached lists in place"
+        fi
+        exit 0
+    fi
+done
+
+log "giving up after ${MAX_WAIT}s, cached lists stay active (cron will retry at 04:00)"

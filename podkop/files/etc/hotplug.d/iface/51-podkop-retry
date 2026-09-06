@@ -1,0 +1,11 @@
+#!/bin/sh
+# When WAN comes back up, refresh podkop lists immediately instead of waiting
+# for the next retry tick. Cheap no-op when lists are already current.
+[ "$ACTION" = ifup ] || exit 0
+[ "$INTERFACE" = wan ] || exit 0
+[ -x /usr/libexec/podkop-list-retry ] || exit 0
+
+# Only bother if a previous run flagged that lists are stale.
+[ -f /var/run/podkop-lists-stale ] || exit 0
+
+/usr/libexec/podkop-list-retry >/dev/null 2>&1 &

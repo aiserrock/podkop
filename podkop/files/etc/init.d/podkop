@@ -469,6 +469,10 @@ remove_cron_job() {
 }
 
 list_update() {
+    # Cap the total time spent fetching lists in this run, so a dead upstream
+    # cannot stall startup for minutes on end.
+    list_budget_start
+
     # Ensure the list-download tunnel inbound is up before any fetch. This runs
     # both at boot (start_service) and on the cron-driven `list_update` path, so
     # daily updates also go through the main tunnel when the option is enabled
@@ -947,6 +951,76 @@ dl_spider() {
     fi
 }
 
+# Lists live in /tmp (tmpfs), so every reboot starts with an empty cache and
+# forces a fetch. When the tunnel is down that fetch cannot succeed, which used
+# to stall start_service forever. Keep a copy on flash so routing can come up
+# from the last known-good lists without touching the network at all.
+LIST_CACHE_DIR="/etc/podkop/cache"
+# How long a single list may block the boot path before we give up and let
+# start_service finish. Downloads keep retrying in the background afterwards.
+# Kept short: a reachable GitHub answers in well under a second, so a list that
+# is still failing after this long is not coming back within the boot window.
+LIST_FETCH_DEADLINE=25
+# Total budget for ALL list fetching in one startup. With a dozen configured
+# list URLs, per-list deadlines alone still add up to many minutes of a stalled
+# start_service. Once the budget is spent we stop trying entirely, serve
+# everything from cache, and let the background retry handle the rest.
+# Overridable from the environment: the background retry runs off the boot path
+# and passes a much larger budget, where a slow fetch costs nothing.
+LIST_BUDGET_TOTAL="${LIST_BUDGET_TOTAL:-45}"
+LIST_BUDGET_FLAG="/var/run/podkop-list-budget-spent"
+
+# Marks the start of a fetching session. Called once per list_update run.
+list_budget_start() {
+    rm -f "$LIST_BUDGET_FLAG"
+    LIST_BUDGET_DEADLINE=$(( $(date +%s) + LIST_BUDGET_TOTAL ))
+    export LIST_BUDGET_DEADLINE
+}
+
+# Returns 0 while there is still time to attempt a download.
+list_budget_ok() {
+    [ -f "$LIST_BUDGET_FLAG" ] && return 1
+    [ -n "$LIST_BUDGET_DEADLINE" ] || return 0
+    if [ "$(date +%s)" -ge "$LIST_BUDGET_DEADLINE" ]; then
+        touch "$LIST_BUDGET_FLAG"
+        log "List download budget (${LIST_BUDGET_TOTAL}s) exhausted, using cached lists for the rest of this startup"
+        schedule_list_retry
+        return 1
+    fi
+    return 0
+}
+
+cache_store() {
+    local src="$1"
+    local key="$2"
+    [ -s "$src" ] || return 1
+    mkdir -p "$LIST_CACHE_DIR"
+    cp "$src" "$LIST_CACHE_DIR/$key" 2>/dev/null && debug "cache_store: saved $key"
+}
+
+# Restore a list from flash cache. Returns 0 only if a usable copy was found,
+# so callers can tell "running on cached data" from "no data at all".
+cache_restore() {
+    local key="$1"
+    local dest="$2"
+    [ -s "$LIST_CACHE_DIR/$key" ] || return 1
+    mkdir -p "$(dirname "$dest")"
+    cp "$LIST_CACHE_DIR/$key" "$dest" 2>/dev/null || return 1
+    log "Using cached list $key (download unavailable)"
+    return 0
+}
+
+# Schedule a background retry so lists get refreshed once connectivity returns,
+# without holding up the boot path. Single instance guarded by a lock file.
+schedule_list_retry() {
+    # Flag consumed by the ifup hotplug hook, so a WAN recovery can trigger an
+    # immediate refresh instead of waiting for the next retry tick.
+    touch /var/run/podkop-lists-stale 2>/dev/null
+    [ -x /usr/libexec/podkop-list-retry ] || return 0
+    /usr/libexec/podkop-list-retry >/dev/null 2>&1 &
+    log "Scheduled background list retry (will reload podkop once network is back)"
+}
+
 lists_domains_download() {
     local URL="$1"
 
@@ -966,12 +1040,22 @@ lists_domains_download() {
         ;;
     esac
 
+    # Skip the network entirely once the startup budget is gone.
+    if ! list_budget_ok; then
+        cache_restore podkop-domains.lst /tmp/dnsmasq.d/podkop-domains.lst
+        return 1
+    fi
+
+    # Bounded retry: never block start_service longer than LIST_FETCH_DEADLINE.
+    # A dead tunnel must not cost us the whole routing setup that follows.
+    local deadline=$(( $(date +%s) + LIST_FETCH_DEADLINE ))
     count=0
-    while true; do
+    while [ "$(date +%s)" -lt "$deadline" ]; do
         if dl_github_ok; then
             dl_get "$URL" /tmp/dnsmasq.d/podkop-domains.lst
             if [ $? -eq 0 ]; then
                 sed -i 's/fw4#vpn_domains/PodkopTable#podkop_domains/g' /tmp/dnsmasq.d/podkop-domains.lst
+                cache_store /tmp/dnsmasq.d/podkop-domains.lst podkop-domains.lst
                 return 0
             fi
         else
@@ -983,14 +1067,17 @@ lists_domains_download() {
             sleep_interval=1
         elif [ $count -ge 30 ] && [ $count -lt 60 ]; then
             sleep_interval=5
-        elif [ $count -ge 60 ] && [ $count -lt 90 ]; then
-            sleep_interval=10
         else
-            sleep_interval=30
+            sleep_interval=10
         fi
 
         sleep $sleep_interval
     done
+
+    log "Domain list download timed out after ${LIST_FETCH_DEADLINE}s, continuing startup"
+    cache_restore podkop-domains.lst /tmp/dnsmasq.d/podkop-domains.lst
+    schedule_list_retry
+    return 1
 }
 
 lists_services_download() {
@@ -1007,13 +1094,21 @@ lists_services_download() {
         ;;
     esac
 
+    if ! list_budget_ok; then
+        cache_restore ${name}-domains.lst /tmp/dnsmasq.d/${name}-domains.lst
+        return 1
+    fi
+
+    # Bounded retry, same rationale as lists_domains_download.
+    local deadline=$(( $(date +%s) + LIST_FETCH_DEADLINE ))
     count=0
-    while true; do
+    while [ "$(date +%s)" -lt "$deadline" ]; do
         if dl_github_ok; then
             dl_get "$URL" /tmp/dnsmasq.d/${name}-domains.lst
             if [ $? -eq 0 ]; then
                 delist_downloaded_domains "$name"
                 sed -i "s/.*/nftset=\/&\/4#inet#PodkopTable#${name}_domains/g" /tmp/dnsmasq.d/${name}-domains.lst
+                cache_store /tmp/dnsmasq.d/${name}-domains.lst ${name}-domains.lst
                 return 0
             fi
         else
@@ -1025,18 +1120,35 @@ lists_services_download() {
             sleep_interval=1
         elif [ $count -ge 30 ] && [ $count -lt 60 ]; then
             sleep_interval=5
-        elif [ $count -ge 60 ] && [ $count -lt 90 ]; then
-            sleep_interval=10
         else
-            sleep_interval=30
+            sleep_interval=10
         fi
 
         sleep $sleep_interval
     done
+
+    log "Service list download timed out after ${LIST_FETCH_DEADLINE}s, continuing startup"
+    cache_restore ${name}-domains.lst /tmp/dnsmasq.d/${name}-domains.lst
+    schedule_list_retry
+    return 1
 }
 
 list_subnets_download() {
     local URL="$1"
+
+    # Budget exhausted: load this subnet list straight from cache. With a dozen
+    # configured URLs, probing each one at ~3s adds up to a long stalled boot.
+    if ! list_budget_ok; then
+        local cname=$(basename "$URL")
+        mkdir -p /tmp/podkop
+        if cache_restore "subnets-$cname" "/tmp/podkop/$cname"; then
+            while IFS= read -r subnet; do
+                [ -n "$subnet" ] || continue
+                nft add element inet PodkopTable podkop_subnets { $subnet } 2>/dev/null
+            done <"/tmp/podkop/$cname"
+        fi
+        return
+    fi
 
     case "$URL" in
     "twitter")
@@ -1053,11 +1165,37 @@ list_subnets_download() {
         if dl_spider "$URL"; then
             log "URL is valid"
         else
-            log "URL $URL is not valid"
+            # Unreachable URL usually means the tunnel/WAN is down rather than a
+            # bad URL. Fall back to the cached copy so the set still gets filled,
+            # and let the background retry refresh it later.
+            log "URL $URL is not valid or unreachable"
+            local cached_name=$(basename "$URL")
+            mkdir -p /tmp/podkop
+            if cache_restore "subnets-$cached_name" "/tmp/podkop/$cached_name"; then
+                while IFS= read -r subnet; do
+                    [ -n "$subnet" ] || continue
+                    nft add element inet PodkopTable podkop_subnets { $subnet } 2>/dev/null
+                done <"/tmp/podkop/$cached_name"
+            fi
+            schedule_list_retry
             return
         fi
         ;;
     esac
+
+    # Re-check: dl_spider above can burn several seconds per URL, and with a
+    # dozen of them the budget often runs out mid-list.
+    if ! list_budget_ok; then
+        local bname=$(basename "$URL")
+        mkdir -p /tmp/podkop
+        if cache_restore "subnets-$bname" "/tmp/podkop/$bname"; then
+            while IFS= read -r subnet; do
+                [ -n "$subnet" ] || continue
+                nft add element inet PodkopTable podkop_subnets { $subnet } 2>/dev/null
+            done <"/tmp/podkop/$bname"
+        fi
+        return
+    fi
 
     local filename=$(basename "$URL")
     mkdir -p /tmp/podkop
@@ -1073,9 +1211,18 @@ list_subnets_download() {
     if ! grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}[[:space:]]*$' "$tmp" 2>/dev/null; then
         log "Subnet list $filename empty or invalid after download, keeping previous set entries"
         rm -f "$tmp"
+        # Nothing usable in /tmp after a reboot — fall back to flash cache.
+        if [ ! -s "$dest" ] && cache_restore "subnets-$filename" "$dest"; then
+            while IFS= read -r subnet; do
+                [ -n "$subnet" ] || continue
+                nft add element inet PodkopTable podkop_subnets { $subnet } 2>/dev/null
+            done <"$dest"
+        fi
+        schedule_list_retry
         return
     fi
     mv "$tmp" "$dest"
+    cache_store "$dest" "subnets-$filename"
 
     while IFS= read -r subnet; do
         [ -n "$subnet" ] || continue
@@ -1108,11 +1255,39 @@ list_custom_download_domains_create() {
     local name="$2"
     local filename=$(basename "$URL")
     local config="/tmp/dnsmasq.d/${name}-${filename}.lst"
+    local cache_key="domains-${name}-${filename}"
 
-    rm -f "$config"
     mkdir -p /tmp/podkop
-    dl_get "$URL" "/tmp/podkop/${filename}"
+
+    # Budget spent: rebuild this list from cache instead of hitting the network.
+    if ! list_budget_ok; then
+        if cache_restore "$cache_key" "/tmp/podkop/${filename}"; then
+            rm -f "$config"
+            while IFS= read -r domain; do
+                [ -n "$domain" ] || continue
+                echo "nftset=/$domain/4#inet#PodkopTable#${name}_domains" >>$config
+            done <"/tmp/podkop/$filename"
+            dnsmasq_config_check ${name}-${filename}.lst
+        fi
+        return
+    fi
+
+    # Fetch to a temp file so a failed download keeps the previous list intact.
+    local tmp="/tmp/podkop/${filename}.new"
+    if dl_get "$URL" "$tmp" && [ -s "$tmp" ]; then
+        mv "$tmp" "/tmp/podkop/${filename}"
+        cache_store "/tmp/podkop/${filename}" "$cache_key"
+    else
+        rm -f "$tmp"
+        log "Custom domain list $filename unavailable, falling back to cache"
+        cache_restore "$cache_key" "/tmp/podkop/${filename}" || return
+        schedule_list_retry
+    fi
+
+    [ -s "/tmp/podkop/${filename}" ] || return
+    rm -f "$config"
     while IFS= read -r domain; do
+        [ -n "$domain" ] || continue
         echo "nftset=/$domain/4#inet#PodkopTable#${name}_domains" >>$config
     done <"/tmp/podkop/$filename"
     dnsmasq_config_check ${name}-${filename}.lst

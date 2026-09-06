@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=podkop
-PKG_VERSION:=2.5.5
+PKG_VERSION:=2.5.6
 PKG_RELEASE:=1
 
 PKG_MAINTAINER:=ITDog <podkop@itdog.info>
@@ -34,6 +34,7 @@ define Package/podkop/prerm
 grep -q "105 podkop" /etc/iproute2/rt_tables && sed -i "/105 podkop/d" /etc/iproute2/rt_tables
 
 rm -f /etc/hotplug.d/iface/50-podkop
+rm -f /etc/hotplug.d/iface/51-podkop-retry
 
 exit 0
 endef
@@ -52,6 +53,10 @@ define Package/podkop/install
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/50-podkop $(1)/etc/hotplug.d/iface/50-podkop
+	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/51-podkop-retry $(1)/etc/hotplug.d/iface/51-podkop-retry
+
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./files/usr/libexec/podkop-list-retry $(1)/usr/libexec/podkop-list-retry
 endef
 
 $(eval $(call BuildPackage,podkop))
